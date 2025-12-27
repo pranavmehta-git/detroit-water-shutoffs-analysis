@@ -1,0 +1,353 @@
+---
+title: "Water Shutoffs, Race, and Income in Detroit"
+subtitle: "Analyzing Disparities in Residential Water Service Disconnections"
+author: "Pranav Mehta"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: yes
+    toc_depth: 3
+    toc_float: yes
+    number_sections: yes
+    highlight: tango
+    theme: default
+    fig_caption: yes
+    df_print: tibble
+  pdf_document:
+    toc: yes
+    toc_depth: '3'
+    number_sections: yes
+urlcolor: blue
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+# Introduction
+
+Detroit's residential water shutoff crisis has garnered national attention, with tens of thousands of households losing water service due to unpaid bills. Critics argue that shutoffs disproportionately burden Black and low-income communities, raising concerns about environmental justice and access to essential services.
+
+This analysis examines the relationship between water shutoffs, race, and income at the census tract level in Detroit from 2010–2017. Using administrative shutoff data linked to American Community Survey demographics, I investigate whether racial composition or income is a stronger predictor of shutoff rates—both across neighborhoods and over time.
+
+This analysis was completed as part of the *Data Analysis for Policy Research using R* course at Columbia University, taught by Prof. Harold Stolper.
+
+# Data and Methods
+
+## Data Sources
+
+The analysis combines two datasets:
+
+- **Water shutoff records** (2010–2017): Administrative data on service disconnections, geocoded to census tracts
+- **American Community Survey**: Tract-level demographics including population, racial composition, and median household income
+
+```{r load-libraries}
+library(foreign)    
+library(readstata13)
+library(tidyverse)
+library(lubridate)
+library(weights)
+library(tidycensus)
+```
+
+## Data Preparation
+
+```{r load-data, results='hide'}
+MI_acs_tract_10_17 <- readRDS("Data/MI_acs_tract_10_17.rds")
+input_si <- read.dta13("Data/si_1017_cleaned.dta")
+
+si.clean <- input_si %>% 
+  select(si_order_number, census_tract_long, year, month) %>% 
+  rename(tractid = census_tract_long) %>% 
+  arrange(tractid, year, month)
+
+# Aggregate to tract-year/month totals
+si_tract_ym <- si.clean %>% 
+  group_by(tractid, year, month) %>% 
+  summarise(si_count = n_distinct(si_order_number)) %>% 
+  arrange(tractid, year, month)
+```
+
+I construct two analytical datasets: a tract-level panel with monthly observations, and a cross-sectional dataset aggregating shutoffs over the entire study period.
+
+```{r construct-panels, results='hide'}
+# Tract-year/month panel
+tract_ym <- left_join(si_tract_ym, MI_acs_tract_10_17,
+                      by = c("tractid", "year")) %>% 
+  mutate(date = make_date(year, month, 1)) %>% 
+  arrange(tractid, year, month) %>% 
+  filter(date != "2017-11-01")
+
+# Cross-sectional tract-level dataset
+tract <- tract_ym %>% 
+  group_by(tractid) %>%
+  summarise(si_count = sum(si_count),
+            pop = mean(pop, na.rm = TRUE),
+            blackshare = mean(blackshare, na.rm = TRUE),
+            black75 = round(mean(black75, na.rm = TRUE), 0),
+            medianinc = mean(medianinc, na.rm = TRUE),
+            inc_above_median = round(mean(inc_above_median, na.rm = TRUE), 0)) %>% 
+  mutate(si_1000 = si_count / (pop / 1000)) %>%
+  arrange(tractid)
+```
+
+The key outcome variable is **shutoffs per 1,000 residents**, which normalizes for population differences across tracts.
+
+# Cross-Sectional Analysis
+
+This section explores variation in shutoffs *across* census tracts, treating each tract as a single observation with shutoffs summed over the entire 2010–2017 period.
+
+## Shutoffs and Racial Composition
+
+```{r plot-race, echo=FALSE}
+ggplot(data = tract, 
+       aes(x = blackshare,
+           y = si_1000,
+           size = pop,
+           color = medianinc)) + 
+  geom_point(alpha = 0.5, color = "#2C3E50") +
+  scale_size(range = c(1, 8), guide = "none") +
+  scale_x_continuous(labels = scales::percent_format(scale = 1)) + 
+  scale_y_continuous(expand = expansion(mult = c(0, 0.05))) +
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title = element_text(size = 13, face = "bold", hjust = 0.5),
+    axis.title = element_text(size = 13),
+    axis.text = element_text(color = "#4F4F4F"),
+    panel.grid.minor = element_blank(),
+    panel.grid.major.x = element_line(color = "grey85"),
+    panel.grid.major.y = element_line(color = "grey90")
+  ) +
+  ggtitle("Water Shutoffs per 1,000 Residents vs. Black Population Share") +
+  xlab("Share of Black Residents (%)") +
+  ylab("Shutoffs per 1,000 Residents") +
+  geom_smooth(method = "lm", se = FALSE, color = "#E74C3C", linewidth = 1.2)
+```
+
+*Figure 1. Relationship between water shutoffs per 1,000 residents and Black population share across census tracts.*
+
+Figure 1 reveals a strong positive association between Black population share and shutoff rates. The weighted correlation coefficient is `r round(wtd.cor(tract$blackshare, tract$si_1000, weight = tract$pop)[1,1], 2)`, indicating that predominantly Black neighborhoods experience substantially higher rates of water disconnection.
+
+While this visualization cannot establish causality, it highlights a concerning pattern: communities with higher shares of Black residents face disproportionate burdens from water shutoff policies.
+
+## Shutoffs and Income
+
+```{r plot-income, echo=FALSE}
+ggplot(data = tract, 
+       aes(x = medianinc,
+           y = si_1000,
+           size = pop)) +
+  geom_point(alpha = 0.5, color = "#2C3E50") +
+  geom_smooth(method = "lm", se = FALSE, color = "#E74C3C", linewidth = 1.2) +
+  scale_size(range = c(1, 8), guide = "none") +
+  scale_x_continuous(labels = scales::dollar_format()) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.05))) +
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title = element_text(size = 13, face = "bold", hjust = 0.5),
+    axis.title = element_text(size = 13),
+    axis.text = element_text(color = "#4F4F4F"),
+    panel.grid.minor = element_blank(),
+    panel.grid.major.x = element_line(color = "grey85"),
+    panel.grid.major.y = element_line(color = "grey90")
+  ) +
+  ggtitle("Water Shutoffs per 1,000 Residents vs. Median Household Income") +
+  xlab("Median Household Income ($)") +
+  ylab("Shutoffs per 1,000 Residents")
+```
+
+*Figure 2. Relationship between water shutoffs per 1,000 residents and median household income across census tracts.*
+
+Surprisingly, Figure 2 shows only a weak relationship between median income and shutoff rates. The weighted correlation is just `r round(wtd.cor(tract$medianinc, tract$si_1000, weight = tract$pop)[1,1], 2)`. This runs counter to the intuition that lower-income households would face more shutoffs due to inability to pay bills.
+
+This suggests that income alone does not explain the spatial distribution of shutoffs, and that other factors—including racial composition, utility policy, or infrastructure characteristics—may be more important.
+
+## Joint Relationship: Race and Income
+
+```{r plot-joint, echo=FALSE}
+ggplot(data = tract, 
+       aes(x = blackshare, 
+           y = medianinc, 
+           size = si_1000,
+           color = si_1000)) + 
+  geom_point(alpha = 0.6) +
+  scale_size(range = c(1, 8), guide = "none") +
+  scale_color_gradient(low = "#6D9DC5", high = "#E74C3C", name = "Shutoffs\n(per 1,000)") +
+  scale_x_continuous(labels = scales::percent_format(scale = 1)) +
+  scale_y_continuous(labels = scales::dollar_format()) +
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title = element_text(size = 13, face = "bold", hjust = 0.5),
+    axis.title = element_text(size = 13),
+    axis.text = element_text(color = "#4F4F4F"),
+    panel.grid.minor = element_blank(),
+    panel.grid.major.x = element_line(color = "grey85"),
+    panel.grid.major.y = element_line(color = "grey90"),
+    legend.position = "right",
+    legend.title = element_text(size = 11, face = "bold"),
+    legend.text = element_text(size = 10)
+  ) +
+  ggtitle("Water Shutoffs by Median Income and Black Population Share") +
+  xlab("Share of Black Residents (%)") +
+  ylab("Median Household Income ($)")
+```
+
+*Figure 3. Joint relationship between water shutoffs, median household income, and Black population share across census tracts.*
+
+Figure 3 presents the joint relationship between racial composition, income, and shutoffs. Despite visible clustering in high-Black, low-income tracts, the weighted correlation between Black share and median income is only `r round(wtd.cor(tract$blackshare, tract$medianinc, weight = tract$pop)[1,1], 2)`—indicating these two dimensions of inequality are not tightly correlated with each other.
+
+The pattern suggests that multiple, intersecting dimensions of inequality drive shutoff disparities, rather than a single socioeconomic gradient.
+
+# Time-Series Analysis
+
+This section explores variation *over time* within groups of census tracts, defined by income level and racial composition.
+
+```{r time-series-prep, echo=FALSE, results='hide'}
+detroit_pop <- sum(tract$pop)
+
+ym <- tract_ym %>% 
+  group_by(date) %>% 
+  summarise(si_count = sum(si_count)) %>% 
+  mutate(si_1000 = si_count / (detroit_pop / 1000))
+
+detroit_pop_hi_inc <- tract %>%
+  filter(inc_above_median == 1) %>%
+  summarise(sum(pop)) %>%
+  as.numeric()
+
+detroit_pop_lo_inc <- tract %>%
+  filter(inc_above_median == 0) %>%
+  summarise(sum(pop)) %>%
+  as.numeric()
+
+ym_inc <- tract_ym %>% 
+  group_by(date, inc_above_median) %>% 
+  summarise(si_count = sum(si_count)) %>%
+  na.omit() %>% 
+  ungroup() %>%
+  complete(date, inc_above_median, fill = list(si_count = 0)) %>%
+  mutate(pop = if_else(inc_above_median == 1, 
+                       detroit_pop_hi_inc, 
+                       detroit_pop_lo_inc),
+         si_1000 = si_count / (pop / 1000)) 
+
+ym_inc$inc_above_median <- factor(ym_inc$inc_above_median,
+                                  levels = c(0, 1),
+                                  labels = c("Below median income",
+                                             "Above median income"))
+```
+
+## Shutoffs Over Time by Income
+
+```{r plot-time-income, echo=FALSE}
+ggplot(ym_inc,
+       aes(x = date,
+           y = si_1000,
+           color = inc_above_median,
+           group = inc_above_median)) +
+  geom_line(linewidth = 1.2) +
+  scale_color_manual(
+    values = c("#6D9DC5", "#E74C3C"),
+    labels = c("Below median income", "Above median income"),
+    name = "Tract income"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title = element_text(size = 13, face = "bold", hjust = 0.5),
+    axis.title.x = element_blank(),
+    axis.title.y = element_text(size = 13),
+    axis.text = element_text(color = "#4F4F4F"),
+    panel.grid.minor = element_blank(),
+    panel.grid.major.x = element_line(color = "grey85"),
+    panel.grid.major.y = element_line(color = "grey90"),
+    legend.position = "top",
+    legend.title = element_text(size = 11, face = "bold"),
+    legend.text = element_text(size = 10)
+  ) +
+  ggtitle("Water Shutoffs Over Time by Tract Income Group") +
+  ylab("Shutoffs per 1,000 Residents")
+```
+
+*Figure 4. Time series of water shutoffs per 1,000 residents for tracts above and below citywide median income.*
+
+Figure 4 shows shutoff trends for above- and below-median income tracts. The average shutoff rate is slightly higher in above-median tracts (`r round(mean(ym_inc$si_1000[ym_inc$inc_above_median == "Above median income"], na.rm = TRUE), 2)` vs. `r round(mean(ym_inc$si_1000[ym_inc$inc_above_median == "Below median income"], na.rm = TRUE), 2)`), a difference of just `r round(with(ym_inc, mean(si_1000[inc_above_median == "Above median income"], na.rm = TRUE) - mean(si_1000[inc_above_median == "Below median income"], na.rm = TRUE)), 2)` shutoffs per 1,000 residents.
+
+This confirms that income does not strongly predict shutoff rates over time.
+
+## Shutoffs Over Time by Racial Composition
+
+```{r time-series-race-prep, echo=FALSE, results='hide'}
+detroit_pop_black <- tract %>%
+  filter(black75 == 1) %>%
+  summarise(sum(pop)) %>%
+  as.numeric()
+
+detroit_pop_nblack <- tract %>%
+  filter(black75 == 0) %>%
+  summarise(sum(pop)) %>%
+  as.numeric()
+
+ym_race <- tract_ym %>% 
+  group_by(date, black75) %>% 
+  summarise(si_count = sum(si_count)) %>%
+  na.omit() %>% 
+  ungroup() %>%
+  complete(date, black75, fill = list(si_count = 0)) %>%
+  mutate(pop = if_else(black75 == 1, 
+                       detroit_pop_black, 
+                       detroit_pop_nblack),
+         si_1000 = si_count / (pop / 1000))
+
+ym_race$black75 <- factor(ym_race$black75,
+                          levels = c(0, 1),
+                          labels = c("Less than 75% Black", "At least 75% Black"))
+```
+
+```{r plot-time-race, echo=FALSE}
+ggplot(ym_race, aes(x = date, y = si_1000, color = black75, group = black75)) +
+  geom_line(linewidth = 1.2) +
+  scale_color_manual(
+    values = c("Less than 75% Black" = "#6D9DC5",
+               "At least 75% Black"  = "#E74C3C"),
+    name = "Tract racial composition"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title = element_text(size = 13, face = "bold", hjust = 0.5),
+    axis.title.x = element_blank(),
+    axis.title.y = element_text(size = 13),
+    axis.text = element_text(color = "#4F4F4F"),
+    panel.grid.minor = element_blank(),
+    panel.grid.major.x = element_line(color = "grey85"),
+    panel.grid.major.y = element_line(color = "grey90"),
+    legend.position = "top",
+    legend.title = element_text(size = 11, face = "bold"),
+    legend.text = element_text(size = 10)
+  ) +
+  ggtitle("Water Shutoffs Over Time by Tract Racial Composition") +
+  ylab("Shutoffs per 1,000 Residents")
+```
+
+*Figure 5. Time series of water shutoffs per 1,000 residents for tracts above and below 75% Black population share.*
+
+Figure 5 reveals a stark and persistent gap. Tracts with at least 75% Black residents experienced an average of `r round(mean(ym_race$si_1000[ym_race$black75 == "At least 75% Black"], na.rm = TRUE), 2)` shutoffs per 1,000 residents, compared with `r round(mean(ym_race$si_1000[ym_race$black75 == "Less than 75% Black"], na.rm = TRUE), 2)` in less-Black tracts—a consistent gap of `r round(with(ym_race, mean(si_1000[black75 == "At least 75% Black"], na.rm = TRUE) - mean(si_1000[black75 == "Less than 75% Black"], na.rm = TRUE)), 2)` throughout the study period.
+
+This persistent disparity underscores that racial inequality in water shutoffs is not a temporary phenomenon but a structural feature of service delivery.
+
+# Conclusions
+
+This analysis reveals that **race is a stronger predictor of water shutoff disparities than income** in Detroit.
+
+**Key findings:**
+
+1. **Cross-sectional evidence**: The correlation between Black population share and shutoffs is strong (`r round(wtd.cor(tract$blackshare, tract$si_1000, weight = tract$pop)[1,1], 2)`), while the correlation with median income is weak (`r round(wtd.cor(tract$medianinc, tract$si_1000, weight = tract$pop)[1,1], 2)`). Racial composition explains far more of the variation in shutoff rates across tracts.
+
+2. **Time-series evidence**: Tracts with at least 75% Black residents consistently experience higher shutoff rates throughout the 2010–2017 period. In contrast, the gap between above- and below-median income tracts is small and inconsistent.
+
+3. **Intersecting inequalities**: While both race and income are linked to shutoffs, they are not tightly correlated with each other, suggesting multiple dimensions of inequality at work.
+
+These findings point to structural and systemic inequities—rooted in race—that shape which communities bear the greatest burden of disconnection from essential public services. Addressing these disparities will require policy interventions that go beyond income-based assistance programs to confront the racialized patterns of utility service delivery.
+
+---
+
+*Data sources: Detroit Water and Sewerage Department shutoff records; American Community Survey (2010–2017)*
